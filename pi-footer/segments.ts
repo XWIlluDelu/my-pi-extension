@@ -1,3 +1,4 @@
+import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
 import type { SegmentContext, StatusLineSegment, ThemeLike } from "./types.ts";
 import { applyColor, rainbow, rainbowFlow, resolveColor, thinkingColor } from "./theme.ts";
 import { formatDuration, formatDurationCoarse } from "./time.ts";
@@ -107,11 +108,24 @@ const modelEffort: StatusLineSegment = {
   },
 };
 
+// Session names are user-typed and unbounded; cap their footprint (in display
+// columns) so a long name degrades itself instead of evicting the segments
+// rendered after it. sliceByColumn rather than truncateToWidth: the latter
+// injects an ANSI reset that would knock the ellipsis out of the segment color.
+const SESSION_NAME_MAX_WIDTH = 24;
+
+function clipSessionName(name: string): string {
+  if (visibleWidth(name) <= SESSION_NAME_MAX_WIDTH) return name;
+  return sliceByColumn(name, 0, SESSION_NAME_MAX_WIDTH - 1, true) + "…";
+}
+
 const folder: StatusLineSegment = {
   id: "folder",
   render(ctx, theme) {
     const color = resolveColor("folder");
-    return applyColor(theme, color, `${icons.folder} ${ctx.folder}`);
+    // Session name rides in the folder slot, pi's native footer convention.
+    const text = ctx.sessionName ? `${ctx.folder} • ${clipSessionName(ctx.sessionName)}` : ctx.folder;
+    return applyColor(theme, color, `${icons.folder} ${text}`);
   },
 };
 

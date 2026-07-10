@@ -86,6 +86,7 @@ function buildContext(): SegmentContext | null {
     modelName: currentCtx.model?.name ?? currentCtx.model?.id ?? "?",
     thinkingLevel: currentThinkingLevel,
     folder: basename(currentCtx.cwd ?? ""),
+    sessionName: currentCtx.sessionManager?.getSessionName?.() ?? null,
     gitBranch: footerDataRef?.getGitBranch() ?? null,
     gitStatus: getGitStatus(currentCtx.cwd),
     contextPct: contextStats.percent,
@@ -132,6 +133,7 @@ function computeFooterRenderState(): string {
 
   return [
     currentCtx?.cwd ?? "",
+    String(context?.sessionName ?? ""),
     provider,
     currentCtx?.model?.id ?? "",
     currentCtx?.model?.name ?? "",
@@ -262,6 +264,7 @@ export default function piFooter(pi: ExtensionAPI) {
     syncCumulativeUsage(ctx);
     rerender(ctx);
   });
+  pi.on("session_info_changed", (_e, ctx) => rerender(ctx));
   pi.on("model_select", (_e, ctx) => {
     currentCtx = ctx;
     openaiDisplay.refresh();

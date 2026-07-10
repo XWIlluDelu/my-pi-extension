@@ -25,6 +25,7 @@ export interface SegmentContext {
   modelName: string;
   thinkingLevel: string;
   folder: string;
+  sessionName: string | null;
   gitBranch: string | null;
   gitStatus: GitStatus;
   contextPct: number | null;
