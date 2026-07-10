@@ -1,0 +1,14 @@
+{
+  "name": "trust-all-projects",
+  "version": "0.1.0",
+  "description": "Pi extension that automatically trusts project-local files.",
+  "type": "module",
+  "private": true,
+  "keywords": ["pi-package", "pi", "extension"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

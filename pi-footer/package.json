@@ -1,0 +1,17 @@
+{
+  "name": "pi-footer",
+  "version": "0.1.0",
+  "description": "Minimal powerline-style footer for Pi",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types test/usage.test.mjs && node --experimental-strip-types test/time.test.mjs && node --experimental-strip-types test/openai-display.test.mjs && node --experimental-strip-types test/stash-history.test.mjs"
+  },
+  "keywords": ["pi-package", "pi", "footer", "extension"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  },
+  "pi": {
+    "extensions": ["./index.ts", "./editor-clip.ts"]
+  }
+}
