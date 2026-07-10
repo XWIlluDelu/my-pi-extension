@@ -326,6 +326,12 @@ export default function piFooter(pi: ExtensionAPI) {
     currentCtx = ctx;
     syncCumulativeUsage(ctx);
     currentResponseUsage = null;
+    requestFooterRender();
+  });
+  // agent_end fires per chained run (retry, compaction, queued continuation);
+  // agent_settled fires once when the whole chain is done — that closes the turn.
+  pi.on("agent_settled", (_event, ctx) => {
+    currentCtx = ctx;
     turnClock.onTurnEnd();
     requestFooterRender();
   });

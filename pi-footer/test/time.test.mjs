@@ -42,8 +42,11 @@ assert.deepEqual(
   assert.equal(c.turnMs(), 3_500); // live, from agent_start (never inflated by history)
   assert.equal(c.sessionMs(), 33_500); // base + live
 
+  c.onTurnStart(); // chained run (retry/compaction/continuation): same turn
+  assert.equal(c.turnMs(), 3_500);
+
   clock.now = 6_000;
-  c.onTurnEnd(); // turn = 5_000
+  c.onTurnEnd(); // agent_settled: turn = 5_000
   assert.equal(c.running(), false);
   assert.equal(c.turnMs(), 5_000);
   assert.equal(c.sessionMs(), 35_000);

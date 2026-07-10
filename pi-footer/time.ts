@@ -1,13 +1,17 @@
 import { isRecord } from "./util.ts";
 
 // ── Turn / session timing ──
-// One live turn is timed as active agent time: agent_start → agent_end in this
-// process. The session total (sum of past turns) is reconstructed from the
-// session log's per-turn timestamps, so it survives /resume and extension reload
-// without any separate persistence. The two only diverge across an interrupt
-// gap; a normal turn has no idle within it, so log-reconstructed duration equals
-// active time. An interrupted-then-resumed turn adds its gap to the historical
-// sum only — the live turn, timed from agent_start, never inflates.
+// One live turn spans a whole agent-run chain: it opens at the first
+// agent_start and closes at agent_settled. Pi fires agent_start once per
+// chained run — automatic retries, mid-run compaction, queued continuations —
+// but agent_settled only after the chain is done, so those extend the turn
+// instead of restarting it. The session total (sum of past turns) is
+// reconstructed from the session log's per-turn timestamps, so it survives
+// /resume and extension reload without any separate persistence. The two only
+// diverge across an interrupt gap; a normal turn has no idle within it, so
+// log-reconstructed duration equals active time. An interrupted-then-resumed
+// turn adds its gap to the historical sum only — the live turn, timed from
+// agent_start, never inflates.
 
 function entryMs(entry: Record<string, unknown>): number | null {
   const ts = entry.timestamp;
@@ -30,7 +34,9 @@ export interface SessionTimeBase {
 
 // A turn opens at the first user message after the previous turn closed, and
 // closes at the first assistant message whose stopReason is terminal (anything
-// other than "toolUse", which only marks a mid-turn tool step).
+// other than "toolUse", which only marks a mid-turn tool step). The log has no
+// settle marker, so a run chain reconstructs as one turn per prompt→terminal
+// response; chain links abut in time, so the sum is unaffected.
 export function reconstructSessionTime(entries: readonly unknown[]): SessionTimeBase {
   let sumMs = 0;
   let lastTurnMs = 0;
@@ -85,10 +91,9 @@ export class TurnClock {
   }
 
   onTurnStart(): void {
-    // Bank a still-open turn (an interrupt that never fired agent_end) before
-    // starting the next, so its active time is not silently dropped.
-    if (this.turnStartMs !== null) this.onTurnEnd();
-    this.turnStartMs = this.now();
+    // agent_start fires once per run in a chain (retry, compaction, queued
+    // continuation); only the first opens the turn — agent_settled closes it.
+    if (this.turnStartMs === null) this.turnStartMs = this.now();
   }
 
   onTurnEnd(): void {
