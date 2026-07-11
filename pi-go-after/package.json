@@ -1,0 +1,17 @@
+{
+	"name": "pi-go-after",
+	"version": "0.1.0",
+	"description": "One-shot timer: /go-after <when> <prompt> sends the prompt later, as if typed.",
+	"type": "module",
+	"private": true,
+	"keywords": ["pi-package", "pi", "extension"],
+	"scripts": {
+		"test": "node --experimental-strip-types test/plan.test.mjs"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.80.0"
+	},
+	"pi": {
+		"extensions": ["./index.ts"]
+	}
+}
