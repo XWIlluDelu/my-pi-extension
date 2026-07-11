@@ -33,6 +33,8 @@ export type Plan =
 	| { action: "arm"; targetMs: number; prompt: string }
 	| { action: "error"; message: string };
 
+type Timer = { targetMs: number; prompt: string };
+
 const BARE_MINUTES = /^\d+$/;
 const UNIT_DURATION = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/;
 const CLOCK = /^(\d{1,2}):(\d{2})$/;
@@ -43,12 +45,17 @@ function unitDurationMs(token: string): number | undefined {
 	return (Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0)) * 1000;
 }
 
-export function parseWhen(token: string, nowMs: number): WhenResult {
-	if (BARE_MINUTES.test(token)) {
-		const minutes = Number(token);
-		if (minutes === 0) return { error: "duration must be positive" };
-		return { targetMs: nowMs + minutes * 60_000, kind: "duration" };
+function durationWhen(durationMs: number, nowMs: number): WhenResult {
+	if (durationMs === 0) return { error: "duration must be positive" };
+	const targetMs = nowMs + durationMs;
+	if (!Number.isSafeInteger(durationMs) || Number.isNaN(new Date(targetMs).getTime())) {
+		return { error: "duration is too large" };
 	}
+	return { targetMs, kind: "duration" };
+}
+
+export function parseWhen(token: string, nowMs: number): WhenResult {
+	if (BARE_MINUTES.test(token)) return durationWhen(Number(token) * 60_000, nowMs);
 	const clock = CLOCK.exec(token);
 	if (clock) {
 		const hh = Number(clock[1]);
@@ -61,14 +68,11 @@ export function parseWhen(token: string, nowMs: number): WhenResult {
 		return { targetMs: d.getTime(), kind: "clock" };
 	}
 	const ms = unitDurationMs(token);
-	if (ms !== undefined) {
-		if (ms === 0) return { error: "duration must be positive" };
-		return { targetMs: nowMs + ms, kind: "duration" };
-	}
+	if (ms !== undefined) return durationWhen(ms, nowMs);
 	return { error: `cannot parse "${token}" — use minutes (180), a duration (2h30m), or 24-hour time (17:05)` };
 }
 
-export function planCommand(args: string, nowMs: number, commandNames: readonly string[]): Plan {
+export function planCommand(args: string, nowMs: number): Plan {
 	const input = args.trim();
 	if (!input) return { action: "status" };
 	const firstSpace = input.search(/\s/);
@@ -91,10 +95,10 @@ export function planCommand(args: string, nowMs: number, commandNames: readonly 
 			};
 		}
 	}
-	if (firstWord.startsWith("/") && commandNames.includes(firstWord.slice(1))) {
+	if (firstWord.startsWith("/") && !firstWord.slice(1).includes("/")) {
 		return {
 			action: "error",
-			message: `prompt starts with the registered command "${firstWord}" — deferred prompts are sent as plain text, so commands and templates would not run`,
+			message: `prompt starts with slash-command-like text "${firstWord}" — deferred prompts are plain text, so commands and templates would not run`,
 		};
 	}
 	return { action: "arm", targetMs: when.targetMs, prompt };
@@ -143,12 +147,16 @@ function preview(prompt: string): string {
 	return flat.length <= PREVIEW_CHARS ? flat : `${flat.slice(0, PREVIEW_CHARS - 1)}…`;
 }
 
+function describeTimer(timer: Timer, nowMs: number): string {
+	return `${formatClock(timer.targetMs, nowMs)} (in ${formatRemaining(timer.targetMs - nowMs)}): "${preview(timer.prompt)}"`;
+}
+
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI): void {
-	let armed: { targetMs: number; prompt: string } | undefined;
+	let armed: Timer | undefined;
 	let interval: ReturnType<typeof setInterval> | undefined;
 	let chip: string | undefined;
 
@@ -159,11 +167,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 		armed = undefined;
 		chip = undefined;
-		try {
-			ctx?.ui.setStatus(STATUS_KEY, undefined);
-		} catch {
-			// teardown may have taken the UI first
-		}
+		ctx?.ui.setStatus(STATUS_KEY, undefined);
 	}
 
 	function paint(ctx: ExtensionContext, nowMs: number): void {
@@ -189,13 +193,9 @@ export default function (pi: ExtensionAPI): void {
 			// The prompt was never written anywhere; park it in the input box so it
 			// is not lost, unless the user left a draft there.
 			let parked = false;
-			try {
-				if (ctx.ui.getEditorText().trim() === "") {
-					ctx.ui.pasteToEditor(prompt);
-					parked = true;
-				}
-			} catch {
-				// no editor in this mode; the notification below still carries the prompt
+			if (ctx.hasUI && ctx.ui.getEditorText().trim() === "") {
+				ctx.ui.pasteToEditor(prompt);
+				parked = true;
 			}
 			ctx.ui.notify(
 				parked
@@ -231,18 +231,11 @@ export default function (pi: ExtensionAPI): void {
 		},
 		handler: async (args, ctx) => {
 			const now = Date.now();
-			const plan = planCommand(
-				args ?? "",
-				now,
-				pi.getCommands().map((c) => c.name),
-			);
+			const plan = planCommand(args ?? "", now);
 			switch (plan.action) {
 				case "status":
 					if (armed) {
-						ctx.ui.notify(
-							`Fires at ${formatClock(armed.targetMs, now)} (in ${formatRemaining(armed.targetMs - now)}): "${preview(armed.prompt)}"`,
-							"info",
-						);
+						ctx.ui.notify(`Fires at ${describeTimer(armed, now)}`, "info");
 					} else {
 						ctx.ui.notify(`No pending timer — ${USAGE}, /go-after cancel`, "info");
 					}
@@ -268,8 +261,7 @@ export default function (pi: ExtensionAPI): void {
 					interval = setInterval(() => tick(ctx), TICK_MS);
 					paint(ctx, now);
 					ctx.ui.notify(
-						`${replaced !== undefined ? `Replaced timer (was ${replaced}). ` : ""}Fires at ` +
-							`${formatClock(plan.targetMs, now)} (in ${formatRemaining(plan.targetMs - now)}): "${preview(plan.prompt)}"`,
+						`${replaced !== undefined ? `Replaced timer (was ${replaced}). ` : ""}Fires at ${describeTimer(armed, now)}`,
 						"info",
 					);
 					return;

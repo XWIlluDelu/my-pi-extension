@@ -19,8 +19,8 @@ One timer at a time; arming again replaces the previous one and says so. While a
 - The prompt is sent verbatim as a real user message, using whatever model is selected at fire time. If the agent is mid-run, it is queued as a follow-up and delivered when the run finishes.
 - Waiting writes nothing: no session entries, no context injection, no model calls, no registered tool.
 - The target is a wall-clock instant checked every second, so laptop suspend does not stretch the wait.
-- Deferred prompts are sent as plain text: slash commands and prompt templates would not run, so arming rejects prompts that start with a registered command.
-- If firing is impossible (no model selected, credentials expired), the prompt is parked in the input box instead of lost — press enter after fixing. Failures after sending (e.g. quota still empty) behave exactly like a hand-typed prompt; pi's own retry applies, there is no retry daemon here.
+- Deferred prompts are sent as plain text: slash commands and prompt templates would not run, so arming rejects command-like text at the start of a prompt.
+- If firing is impossible (no model selected or no configured credentials), the prompt is parked when the input box is empty; otherwise the error notification includes it. Failures after sending (e.g. quota still empty) behave exactly like a hand-typed prompt; pi's own retry applies, there is no retry daemon here.
 
 ## Lifetime
 
