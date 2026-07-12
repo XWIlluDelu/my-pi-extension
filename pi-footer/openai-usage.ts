@@ -9,8 +9,9 @@ const AUTH_KEY = "openai-codex";
 const CACHE_PATH = join(homedir(), ".pi", "agent", "pi-footer", "openai-usage-cache.json");
 const CACHE_VERSION = 1;
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-const REFRESH_MS = 10 * 60_000;
+const REFRESH_MS = 15 * 60_000;
 const RETRY_MS = 2 * 60_000;
+const DISK_RECHECK_MS = 10_000;
 const FETCH_TIMEOUT_MS = 10_000;
 
 export interface OpenAIUsageWindow {
@@ -41,11 +42,16 @@ interface OpenAIUsageCache {
 let lastAttemptAt = 0;
 let refreshPromise: Promise<OpenAIUsageDisplay | null> | null = null;
 
-// In-memory mirror of the disk cache. Disk is read once (first access) and on
-// every subsequent access served from memory, so footer rendering never blocks
-// on synchronous file I/O. Writes go write-through: memory first, then disk.
+// In-memory mirror of the disk cache, which is shared by every pi process.
+// While the snapshot is fresh, access is served from memory so footer
+// rendering never blocks on synchronous file I/O. Once it goes stale the disk
+// is re-read (throttled to DISK_RECHECK_MS) so a refresh done by another
+// process is adopted instead of re-fetched: fetchedAt/attemptedAt on disk are
+// what keep N processes at one upstream request per REFRESH_MS window. Writes
+// go write-through: memory first, then disk.
 let memCache: OpenAIUsageCache | null = null;
 let memCacheLoaded = false;
+let lastDiskReadAt = 0;
 
 function numberField(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -122,10 +128,15 @@ function readCacheFromDisk(): OpenAIUsageCache | null {
   }
 }
 
-function readCache(): OpenAIUsageCache | null {
-  if (!memCacheLoaded) {
+function snapshotFresh(cache: OpenAIUsageCache | null, now: number): boolean {
+  return !!cache?.snapshot && now - cache.fetchedAt <= REFRESH_MS;
+}
+
+function readCache(now: number): OpenAIUsageCache | null {
+  if (!memCacheLoaded || (!snapshotFresh(memCache, now) && now - lastDiskReadAt >= DISK_RECHECK_MS)) {
     memCache = readCacheFromDisk();
     memCacheLoaded = true;
+    lastDiskReadAt = now;
   }
   return memCache;
 }
@@ -145,7 +156,7 @@ function writeCache(cache: OpenAIUsageCache): void {
 
 function markAttempt(now: number): void {
   lastAttemptAt = now;
-  const cache = readCache();
+  const cache = readCache(now);
   writeCache({
     version: CACHE_VERSION,
     attemptedAt: now,
@@ -225,7 +236,7 @@ function displayFromCache(cache: OpenAIUsageCache | null, now: number): OpenAIUs
 
 function shouldRefresh(cache: OpenAIUsageCache | null, now: number, force: boolean): boolean {
   if (force) return true;
-  if (cache?.snapshot && now - cache.fetchedAt <= REFRESH_MS) return false;
+  if (snapshotFresh(cache, now)) return false;
   return now - Math.max(lastAttemptAt, cache?.attemptedAt ?? 0) > RETRY_MS;
 }
 
@@ -293,14 +304,14 @@ async function fetchOpenAIUsageSnapshot(): Promise<OpenAIUsageSnapshot | null> {
 
 export function getOpenAIUsageDisplay(): OpenAIUsageDisplay | null {
   const now = Date.now();
-  const cache = readCache();
+  const cache = readCache(now);
   if (shouldRefresh(cache, now, false)) void refreshOpenAIUsage();
   return displayFromCache(cache, now);
 }
 
 export function refreshOpenAIUsage(force = false): Promise<OpenAIUsageDisplay | null> {
   const now = Date.now();
-  const cache = readCache();
+  const cache = readCache(now);
   if (refreshPromise) return refreshPromise;
   if (!shouldRefresh(cache, now, force)) return Promise.resolve(displayFromCache(cache, now));
 
@@ -308,7 +319,7 @@ export function refreshOpenAIUsage(force = false): Promise<OpenAIUsageDisplay | 
   refreshPromise = fetchOpenAIUsageSnapshot()
     .then((snapshot) => {
       const finishedAt = Date.now();
-      if (!snapshot) return displayFromCache(readCache(), finishedAt) ?? displayFromCache(cache, finishedAt);
+      if (!snapshot) return displayFromCache(readCache(finishedAt), finishedAt) ?? displayFromCache(cache, finishedAt);
       const nextCache: OpenAIUsageCache = {
         version: CACHE_VERSION,
         attemptedAt: finishedAt,
