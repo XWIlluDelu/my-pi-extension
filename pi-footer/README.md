@@ -2,10 +2,11 @@
 
 Minimal powerline-style footer for [Pi](https://pi.dev). Shows model, thinking level, folder, git status, context usage, turn/session timing, and extension statuses in a compact line above the editor. Below the editor: the last prompt with rotating token/cost and OpenAI subscription usage stats.
 
-The package ships two independent extensions:
+The package ships three independent extensions:
 
 - **pi-footer** (`index.ts`) — the status footer described above.
 - **editor-clip** (`editor-clip.ts`) — editor stash + clipboard shortcuts. It mutates the editor, not the status line, so it lives on its own; disable it without touching the footer.
+- **freeze** (`freeze.ts`) — render-freeze toggle for stable terminal text selection while the agent is streaming.
 
 ## Layout
 
@@ -35,6 +36,7 @@ The package ships two independent extensions:
 |---|---|
 | `/openai-usage` | Force-refresh OpenAI subscription usage and write the shared disk cache |
 | `/stash-history` | Open the editor stash history picker (editor-clip) |
+| `/freeze` | Toggle render freeze (freeze) |
 
 ## Keyboard shortcuts (editor-clip)
 
@@ -46,6 +48,23 @@ The package ships two independent extensions:
 | `Ctrl+Alt+H` | Open the editor stash history picker |
 
 `getEditorText` returns the paste-expanded content, so a stashed or copied prompt keeps the real text behind a `[pasted N lines]` marker that a terminal-level copy would lose. Restores paste the text back so large content re-collapses into a marker. Stashed text is restored automatically when the agent finishes and the editor is empty. The last 12 stashed prompts persist across sessions in `config.json`.
+
+## Render freeze (freeze)
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Alt+F` | Freeze rendering; any other key (or the same chord) resumes |
+
+Terminal-native mouse selection cannot survive streaming redraws: rows at and
+below the streaming tail are rewritten in place every newline, and the editor's
+buffer rows migrate on every scroll, so a selection anchored there drifts into
+the output or keeps growing. `Ctrl+Alt+F` freezes the renderer so the screen is
+fully static — select and copy anything (a part of the input box, mid-stream
+output) with the mouse, then press any key to resume. Streaming continues in
+memory while frozen; resuming repaints through one ordinary incremental diff,
+so no output is lost and the scrollback is preserved. Implementation: the TUI's
+`requestRender`/`doRender` are shadowed with instance-level no-ops and restored
+on resume (kitty key-release events and the toggle chord itself do not resume).
 
 ## Environment variables
 
@@ -66,6 +85,7 @@ State lives under `~/.pi/agent/pi-footer/`:
 pi-footer/
 ├── index.ts                 — pi-footer extension: event handlers, widgets, render coalescing, heartbeat
 ├── editor-clip.ts           — editor-clip extension: stash/restore, clipboard, history picker
+├── freeze.ts                — freeze extension: render-freeze toggle for stable text selection
 ├── segments.ts              — powerline segment renderers, Nerd Font icons, extension-status ordering
 ├── time.ts                  — turn/session timing: active-time clock + log reconstruction + formatters
 ├── openai-usage.ts          — OpenAI usage fetch, parsing, in-memory + disk cache, compact formatting
