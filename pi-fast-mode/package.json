@@ -1,10 +1,13 @@
 {
   "name": "pi-fast-mode",
-  "version": "0.1.0",
-  "description": "Toggle OpenAI Codex fast mode (service_tier=priority) for eligible models.",
+  "version": "0.2.0",
+  "description": "Toggle fast mode (service_tier=priority) for a user-managed model whitelist.",
   "type": "module",
   "private": true,
   "keywords": ["pi-package", "pi", "extension"],
+  "scripts": {
+    "test": "node --experimental-strip-types test/whitelist.test.mjs && node --experimental-strip-types test/wiring.test.mjs"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0"
   },
