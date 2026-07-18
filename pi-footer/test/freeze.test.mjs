@@ -48,7 +48,7 @@ const ctx = {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const toggle = shortcuts.get("ctrl+alt+f").handler;
+const toggle = shortcuts.get("ctrl+alt+z").handler;
 
 events.get("session_start")(undefined, ctx);
 assert.equal(tui.listeners.size, 1, "input listener registered on session start");
@@ -66,7 +66,7 @@ assert.equal(tui.renders, rendersWhileFrozen, "renders suppressed while frozen")
 
 // Key releases and the toggle chord itself must not resume.
 tui.input("\x1b[97;1:3u"); // kitty release event
-tui.input("\x1b[102;7u"); // ctrl+alt+f press (handled by the shortcut, not the listener)
+tui.input("\x1b[122;7u"); // ctrl+alt+z press (handled by the shortcut, not the listener)
 assert.ok(Object.hasOwn(tui, "doRender"), "still frozen after release/toggle-chord input");
 
 // Any other key resumes: patch removed, one catch-up repaint requested.

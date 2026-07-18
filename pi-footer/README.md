@@ -53,12 +53,12 @@ The package ships three independent extensions:
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+Alt+F` | Freeze rendering; any other key (or the same chord) resumes |
+| `Ctrl+Alt+Z` | Freeze rendering; any other key (or the same chord) resumes |
 
 Terminal-native mouse selection cannot survive streaming redraws: rows at and
 below the streaming tail are rewritten in place every newline, and the editor's
 buffer rows migrate on every scroll, so a selection anchored there drifts into
-the output or keeps growing. `Ctrl+Alt+F` freezes the renderer so the screen is
+the output or keeps growing. `Ctrl+Alt+Z` freezes the renderer so the screen is
 fully static — select and copy anything (a part of the input box, mid-stream
 output) with the mouse, then press any key to resume. Streaming continues in
 memory while frozen; resuming repaints through one ordinary incremental diff,

@@ -10,7 +10,7 @@ import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 // the toggle) resumes. Streaming continues in memory while frozen; resuming
 // repaints through one ordinary incremental diff, so nothing is lost.
 
-const FREEZE_KEY = "ctrl+alt+f";
+const FREEZE_KEY = "ctrl+alt+z";
 
 // Delay between the freeze notification and suppressing renders so the
 // notification itself still paints (the TUI coalesces renders at ~16ms).
