@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import { applyColor, FLOW_FRAME_MS, resolveColor } from "./theme.ts";
 import { SEGMENTS, PRESET, orderedExtensionStatuses } from "./segments.ts";
 import { renderBottomLine } from "./bottom-line.ts";
-import { refreshOpenAIUsage } from "./openai-usage.ts";
+import { refreshOpenAIUsage, setOpenAIUsageSessionRoot } from "./openai-usage.ts";
 import { OpenAIUsageDisplay, modelUsesOpenAISubscription } from "./openai-usage-display.ts";
 import { isRecord } from "./util.ts";
 import { TurnClock } from "./time.ts";
@@ -212,6 +212,10 @@ export default function piFooter(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     currentCtx = ctx;
+    const sessionRoot = ctx.sessionManager?.getSessionDir?.();
+    if (typeof sessionRoot === "string") {
+      setOpenAIUsageSessionRoot(sessionRoot, ctx.sessionManager?.usesDefaultSessionDir?.() !== false);
+    }
 
     ctx.ui.setFooter((tui: any, _theme: Theme, footerData: ReadonlyFooterDataProvider) => {
       footerDataRef = footerData;

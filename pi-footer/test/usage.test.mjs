@@ -4,6 +4,7 @@ import { renderBottomLine } from "../bottom-line.ts";
 import { formatExtensionStatuses, orderedExtensionStatuses } from "../segments.ts";
 import {
   formatOpenAIUsageSnapshot,
+  openAIUsageSnapshotActive,
   openAIUsageSnapshotFromResponse,
 } from "../openai-usage.ts";
 import {
@@ -203,6 +204,65 @@ assert.deepEqual(formatOpenAIUsageSnapshot(openAIUsageSnapshotFromResponse(usage
 });
 assert.deepEqual(formatOpenAIUsageSnapshot(openAIUsageSnapshotFromResponse(usageResponse({ primaryUsed: 100 }))), {
   text: "0%/81% ↺ 1h43m/5d22h",
+  limited: false,
+});
+
+// The current API can expose the sole weekly window in either slot. The
+// dormant 5h parser remains compatible if OpenAI restores that window.
+for (const weeklySlot of ["primary_window", "secondary_window"]) {
+  const rateLimit = {
+    allowed: true,
+    limit_reached: false,
+    primary_window: null,
+    secondary_window: null,
+    [weeklySlot]: {
+      used_percent: 15,
+      limit_window_seconds: 604_800,
+      reset_after_seconds: 570_266,
+    },
+  };
+  assert.deepEqual(formatOpenAIUsageSnapshot(openAIUsageSnapshotFromResponse({
+    rate_limit_reached_type: null,
+    rate_limit: rateLimit,
+  })), {
+    text: "85% ↺ 6d14h",
+    limited: false,
+  });
+}
+
+const weeklySnapshot = openAIUsageSnapshotFromResponse({
+  rate_limit_reached_type: null,
+  rate_limit: {
+    allowed: true,
+    limit_reached: false,
+    primary_window: {
+      used_percent: 15,
+      limit_window_seconds: 604_800,
+      reset_after_seconds: 570_266,
+    },
+    secondary_window: null,
+  },
+});
+assert.equal(openAIUsageSnapshotActive(weeklySnapshot, 1_000, 1_000 + 570_265_000), true);
+assert.equal(openAIUsageSnapshotActive(weeklySnapshot, 1_000, 1_000 + 570_266_000), false);
+assert.deepEqual(formatOpenAIUsageSnapshot(weeklySnapshot, 0, {
+  windowLabel: "7d",
+  usedPercent: 15,
+  usedCost: 21.820896,
+  estimatedLeftCost: 123.651744,
+  resetAt: 604_800_000,
+}), {
+  text: "85% ↺ 6d14h Rem. $123.7",
+  limited: false,
+});
+assert.deepEqual(formatOpenAIUsageSnapshot(openAIUsageSnapshotFromResponse(usageResponse()), 0, {
+  windowLabel: "7d",
+  usedPercent: 19,
+  usedCost: 20,
+  estimatedLeftCost: 85.263,
+  resetAt: 604_800_000,
+}), {
+  text: "69%/81% ↺ 1h43m/5d22h Rem. $85.3",
   limited: false,
 });
 

@@ -1,24 +1,51 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { Buffer } from "node:buffer";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+  estimateOpenAIUsageCost,
+  type OpenAIUsageCostEstimate,
+} from "./openai-cost.ts";
 import { isRecord } from "./util.ts";
 
-const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
+const AGENT_DIR = getAgentDir();
+const AUTH_PATH = join(AGENT_DIR, "auth.json");
 const AUTH_KEY = "openai-codex";
-const CACHE_PATH = join(homedir(), ".pi", "agent", "pi-footer", "openai-usage-cache.json");
-const CACHE_VERSION = 1;
+const CACHE_DIR = join(AGENT_DIR, "pi-footer");
+const CACHE_PATH = join(CACHE_DIR, "openai-usage-cache.json");
+const COST_CACHE_PATH = join(CACHE_DIR, "openai-cost-cache.json");
+const REFRESH_LOCK_PATH = join(CACHE_DIR, "openai-usage-refresh.lock");
+const CACHE_VERSION = 4;
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-const REFRESH_MS = 15 * 60_000;
-const RETRY_MS = 2 * 60_000;
+const REFRESH_MS = 60 * 60_000;
+const RETRY_MS = REFRESH_MS;
 const DISK_RECHECK_MS = 10_000;
 const FETCH_TIMEOUT_MS = 10_000;
+const COST_SCAN_TIMEOUT_MS = 15_000;
+const REFRESH_LOCK_STALE_MS = FETCH_TIMEOUT_MS + COST_SCAN_TIMEOUT_MS + 30_000;
+
+let openAISessionRoot = join(AGENT_DIR, "sessions");
+
+export function setOpenAIUsageSessionRoot(sessionRoot: string, usesDefaultSessionDir: boolean): void {
+  openAISessionRoot = usesDefaultSessionDir ? join(AGENT_DIR, "sessions") : sessionRoot;
+}
 
 export interface OpenAIUsageWindow {
   label: string;
   usedPercent: number;
   leftPercent: number;
   resetSeconds: number | null;
+  resetAt: number | null;
   windowSeconds: number | null;
 }
 
@@ -34,13 +61,16 @@ export interface OpenAIUsageDisplay {
 
 interface OpenAIUsageCache {
   version: typeof CACHE_VERSION;
+  accountId: string;
   attemptedAt: number;
   fetchedAt: number;
   snapshot: OpenAIUsageSnapshot | null;
+  costEstimate: OpenAIUsageCostEstimate | null;
+  estimateSessionRoot: string | null;
 }
 
-let lastAttemptAt = 0;
 let refreshPromise: Promise<OpenAIUsageDisplay | null> | null = null;
+let refreshAccountId: string | null = null;
 
 // In-memory mirror of the disk cache, which is shared by every pi process.
 // While the snapshot is fresh, access is served from memory so footer
@@ -104,6 +134,7 @@ function validWindow(value: unknown): value is OpenAIUsageWindow {
     typeof value.usedPercent === "number" &&
     typeof value.leftPercent === "number" &&
     (typeof value.resetSeconds === "number" || value.resetSeconds === null) &&
+    (typeof value.resetAt === "number" || value.resetAt === null) &&
     (typeof value.windowSeconds === "number" || value.windowSeconds === null);
 }
 
@@ -115,21 +146,58 @@ function validSnapshot(value: unknown): value is OpenAIUsageSnapshot {
     value.windows.every(validWindow);
 }
 
+function validCostEstimate(value: unknown): value is OpenAIUsageCostEstimate {
+  if (!isRecord(value)) return false;
+  return typeof value.windowLabel === "string" &&
+    typeof value.usedPercent === "number" &&
+    typeof value.usedCost === "number" &&
+    typeof value.estimatedLeftCost === "number" &&
+    typeof value.resetAt === "number";
+}
+
 function readCacheFromDisk(): OpenAIUsageCache | null {
   try {
     const value = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
-    if (!isRecord(value) || value.version !== CACHE_VERSION) return null;
+    if (!isRecord(value) || value.version !== CACHE_VERSION || typeof value.accountId !== "string") return null;
     const attemptedAt = numberField(value.attemptedAt) ?? 0;
     const fetchedAt = numberField(value.fetchedAt) ?? 0;
     const snapshot = validSnapshot(value.snapshot) ? value.snapshot : null;
-    return { version: CACHE_VERSION, attemptedAt, fetchedAt: snapshot ? fetchedAt : 0, snapshot };
+    const costEstimate = validCostEstimate(value.costEstimate) ? value.costEstimate : null;
+    const estimateSessionRoot = typeof value.estimateSessionRoot === "string" ? value.estimateSessionRoot : null;
+    return {
+      version: CACHE_VERSION,
+      accountId: value.accountId,
+      attemptedAt,
+      fetchedAt: snapshot ? fetchedAt : 0,
+      snapshot,
+      costEstimate,
+      estimateSessionRoot,
+    };
   } catch {
     return null;
   }
 }
 
+function resetDeadline(snapshot: OpenAIUsageSnapshot, fetchedAt: number): number | null {
+  const deadlines = snapshot.windows.flatMap((window) => {
+    if (typeof window.resetAt === "number" && Number.isFinite(window.resetAt)) return [window.resetAt * 1000];
+    if (typeof window.resetSeconds === "number" && Number.isFinite(window.resetSeconds)) {
+      return [fetchedAt + Math.max(0, window.resetSeconds) * 1000];
+    }
+    return [];
+  });
+  return deadlines.length > 0 ? Math.min(...deadlines) : null;
+}
+
+export function openAIUsageSnapshotActive(snapshot: OpenAIUsageSnapshot, fetchedAt: number, now: number): boolean {
+  const deadline = resetDeadline(snapshot, fetchedAt);
+  return deadline === null || now < deadline;
+}
+
 function snapshotFresh(cache: OpenAIUsageCache | null, now: number): boolean {
-  return !!cache?.snapshot && now - cache.fetchedAt <= REFRESH_MS;
+  return !!cache?.snapshot &&
+    now - cache.fetchedAt <= REFRESH_MS &&
+    openAIUsageSnapshotActive(cache.snapshot, cache.fetchedAt, now);
 }
 
 function readCache(now: number): OpenAIUsageCache | null {
@@ -154,14 +222,121 @@ function writeCache(cache: OpenAIUsageCache): void {
   }
 }
 
-function markAttempt(now: number): void {
-  lastAttemptAt = now;
-  const cache = readCache(now);
+function adoptDiskCache(now: number): OpenAIUsageCache | null {
+  const cache = readCacheFromDisk();
+  if (cache) {
+    memCache = cache;
+    memCacheLoaded = true;
+    lastDiskReadAt = now;
+  }
+  return cache;
+}
+
+type RefreshLockResult =
+  | { state: "acquired"; release: () => void }
+  | { state: "busy" | "unavailable" };
+
+interface RefreshLockRecord {
+  token: string;
+  pid: number;
+  createdAt: number;
+}
+
+function errorCode(error: unknown): string | null {
+  return isRecord(error) && typeof error.code === "string" ? error.code : null;
+}
+
+function readRefreshLock(): { raw: string; record: RefreshLockRecord | null } | null {
+  try {
+    const raw = readFileSync(REFRESH_LOCK_PATH, "utf8");
+    const value = JSON.parse(raw);
+    const record = isRecord(value) &&
+      typeof value.token === "string" &&
+      typeof value.pid === "number" &&
+      typeof value.createdAt === "number"
+      ? { token: value.token, pid: value.pid, createdAt: value.createdAt }
+      : null;
+    return { raw, record };
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) === "EPERM";
+  }
+}
+
+function acquireRefreshLock(now: number): RefreshLockResult {
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true });
+  } catch {
+    return { state: "unavailable" };
+  }
+
+  const acquire = (): RefreshLockResult => {
+    const record: RefreshLockRecord = { token: randomUUID(), pid: process.pid, createdAt: Date.now() };
+    let fd: number;
+    try {
+      fd = openSync(REFRESH_LOCK_PATH, "wx", 0o600);
+    } catch (error) {
+      return { state: errorCode(error) === "EEXIST" ? "busy" : "unavailable" };
+    }
+
+    try {
+      writeFileSync(fd, JSON.stringify(record) + "\n");
+    } catch {
+      try { unlinkSync(REFRESH_LOCK_PATH); } catch { /* best effort */ }
+      return { state: "unavailable" };
+    } finally {
+      closeSync(fd);
+    }
+
+    return {
+      state: "acquired",
+      release: () => {
+        try {
+          if (readRefreshLock()?.record?.token === record.token) unlinkSync(REFRESH_LOCK_PATH);
+        } catch {
+          // A stale-lock recovery may already have removed this owner's file.
+        }
+      },
+    };
+  };
+
+  const initial = acquire();
+  if (initial.state !== "busy") return initial;
+
+  try {
+    const observed = readRefreshLock();
+    const age = observed?.record ? now - observed.record.createdAt : now - statSync(REFRESH_LOCK_PATH).mtimeMs;
+    if (age <= REFRESH_LOCK_STALE_MS) return initial;
+    if (observed?.record && processIsAlive(observed.record.pid)) return initial;
+    if (observed && readRefreshLock()?.raw !== observed.raw) return initial;
+    unlinkSync(REFRESH_LOCK_PATH);
+  } catch {
+    return initial;
+  }
+  return acquire();
+}
+
+function cacheForAccount(cache: OpenAIUsageCache | null, accountId: string): OpenAIUsageCache | null {
+  return cache?.accountId === accountId ? cache : null;
+}
+
+function markAttempt(now: number, accountId: string, cache: OpenAIUsageCache | null): void {
   writeCache({
     version: CACHE_VERSION,
+    accountId,
     attemptedAt: now,
     fetchedAt: cache?.fetchedAt ?? 0,
     snapshot: cache?.snapshot ?? null,
+    costEstimate: cache?.costEstimate ?? null,
+    estimateSessionRoot: cache?.estimateSessionRoot ?? null,
   });
 }
 
@@ -204,6 +379,7 @@ function parseUsageWindow(raw: unknown): OpenAIUsageWindow | null {
     usedPercent: clampPercent(used),
     leftPercent: clampPercent(100 - used),
     resetSeconds,
+    resetAt,
     windowSeconds,
   };
 }
@@ -229,15 +405,34 @@ function percentText(windows: OpenAIUsageWindow[]): string | null {
   return windows.map((window) => `${window.leftPercent}%`).join("/");
 }
 
+function compactDollars(value: number): string {
+  if (value >= 1000) return `$${(value / 1000).toFixed(1)}k`;
+  return `$${value.toFixed(value < 10 ? 2 : 1)}`;
+}
+
+function estimateText(estimate: OpenAIUsageCostEstimate): string {
+  return `Rem. ${compactDollars(estimate.estimatedLeftCost)}`;
+}
+
 function displayFromCache(cache: OpenAIUsageCache | null, now: number): OpenAIUsageDisplay | null {
   if (!cache?.snapshot || cache.fetchedAt <= 0) return null;
-  return formatOpenAIUsageSnapshot(cache.snapshot, (now - cache.fetchedAt) / 1000);
+  if (!openAIUsageSnapshotActive(cache.snapshot, cache.fetchedAt, now)) return null;
+  const estimate = cache.costEstimate &&
+    cache.estimateSessionRoot === openAISessionRoot &&
+    now < cache.costEstimate.resetAt
+    ? cache.costEstimate
+    : null;
+  return formatOpenAIUsageSnapshot(cache.snapshot, (now - cache.fetchedAt) / 1000, estimate);
 }
 
 function shouldRefresh(cache: OpenAIUsageCache | null, now: number, force: boolean): boolean {
   if (force) return true;
   if (snapshotFresh(cache, now)) return false;
-  return now - Math.max(lastAttemptAt, cache?.attemptedAt ?? 0) > RETRY_MS;
+  if (cache?.snapshot) {
+    const deadline = resetDeadline(cache.snapshot, cache.fetchedAt);
+    if (deadline !== null && now >= deadline && cache.attemptedAt < deadline) return true;
+  }
+  return now - (cache?.attemptedAt ?? 0) > RETRY_MS;
 }
 
 export function openAIUsageSnapshotFromResponse(value: unknown): OpenAIUsageSnapshot | null {
@@ -258,7 +453,11 @@ export function openAIUsageSnapshotFromResponse(value: unknown): OpenAIUsageSnap
   return { limited, windows };
 }
 
-export function formatOpenAIUsageSnapshot(snapshot: OpenAIUsageSnapshot, elapsedSeconds = 0): OpenAIUsageDisplay | null {
+export function formatOpenAIUsageSnapshot(
+  snapshot: OpenAIUsageSnapshot,
+  elapsedSeconds = 0,
+  costEstimate: OpenAIUsageCostEstimate | null = null,
+): OpenAIUsageDisplay | null {
   const current = snapshotAfterElapsed(snapshot, elapsedSeconds);
   const windows = current.windows;
   if (windows.length === 0) return null;
@@ -276,13 +475,13 @@ export function formatOpenAIUsageSnapshot(snapshot: OpenAIUsageSnapshot, elapsed
 
   const percent = percentText(windows);
   if (!percent) return null;
-  return { text: reset ? `${percent} ↺ ${reset}` : percent, limited: false };
+  const estimate = costEstimate ? ` ${estimateText(costEstimate)}` : "";
+  return { text: reset ? `${percent} ↺ ${reset}${estimate}` : `${percent}${estimate}`, limited: false };
 }
 
-async function fetchOpenAIUsageSnapshot(): Promise<OpenAIUsageSnapshot | null> {
-  const auth = readOpenAIAuth();
-  if (!auth) return null;
-
+async function fetchOpenAIUsageSnapshot(
+  auth: { access: string; accountId: string },
+): Promise<OpenAIUsageSnapshot | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -303,32 +502,93 @@ async function fetchOpenAIUsageSnapshot(): Promise<OpenAIUsageSnapshot | null> {
 }
 
 export function getOpenAIUsageDisplay(): OpenAIUsageDisplay | null {
+  const auth = readOpenAIAuth();
+  if (!auth) return null;
   const now = Date.now();
-  const cache = readCache(now);
+  const cache = cacheForAccount(readCache(now), auth.accountId);
   if (shouldRefresh(cache, now, false)) void refreshOpenAIUsage();
   return displayFromCache(cache, now);
 }
 
+async function estimateOpenAIUsageCostWithTimeout(
+  snapshot: OpenAIUsageSnapshot,
+  fetchedAt: number,
+  accountId: string,
+): Promise<OpenAIUsageCostEstimate | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), COST_SCAN_TIMEOUT_MS);
+  try {
+    return await estimateOpenAIUsageCost(snapshot, fetchedAt, {
+      sessionRoot: openAISessionRoot,
+      costCachePath: COST_CACHE_PATH,
+      scopeKey: accountId,
+      signal: controller.signal,
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function refreshOpenAIUsage(force = false): Promise<OpenAIUsageDisplay | null> {
+  const auth = readOpenAIAuth();
+  if (!auth) return Promise.resolve(null);
+
   const now = Date.now();
-  const cache = readCache(now);
-  if (refreshPromise) return refreshPromise;
+  const cache = cacheForAccount(readCache(now), auth.accountId);
+  if (refreshPromise) {
+    return refreshAccountId === auth.accountId ? refreshPromise : Promise.resolve(null);
+  }
   if (!shouldRefresh(cache, now, force)) return Promise.resolve(displayFromCache(cache, now));
 
-  markAttempt(now);
-  refreshPromise = fetchOpenAIUsageSnapshot()
-    .then((snapshot) => {
+  const refreshLock = acquireRefreshLock(now);
+  if (refreshLock.state === "busy") {
+    const adopted = cacheForAccount(adoptDiskCache(now), auth.accountId) ?? cache;
+    return Promise.resolve(displayFromCache(adopted, now));
+  }
+  const releaseLock = refreshLock.state === "acquired" ? refreshLock.release : () => {};
+
+  markAttempt(now, auth.accountId, cache);
+  refreshAccountId = auth.accountId;
+  refreshPromise = fetchOpenAIUsageSnapshot(auth)
+    .then(async (snapshot) => {
       const finishedAt = Date.now();
-      if (!snapshot) return displayFromCache(readCache(finishedAt), finishedAt) ?? displayFromCache(cache, finishedAt);
-      const nextCache: OpenAIUsageCache = {
+      if (!snapshot) {
+        const adopted = cacheForAccount(adoptDiskCache(finishedAt), auth.accountId) ?? cache;
+        return displayFromCache(adopted, finishedAt);
+      }
+
+      const officialCache: OpenAIUsageCache = {
         version: CACHE_VERSION,
+        accountId: auth.accountId,
         attemptedAt: finishedAt,
         fetchedAt: finishedAt,
         snapshot,
+        costEstimate: null,
+        estimateSessionRoot: null,
       };
-      writeCache(nextCache);
-      return displayFromCache(nextCache, finishedAt);
+      writeCache(officialCache);
+
+      const costEstimate = await estimateOpenAIUsageCostWithTimeout(snapshot, finishedAt, auth.accountId);
+      if (!costEstimate) return displayFromCache(officialCache, Date.now());
+
+      const disk = readCacheFromDisk();
+      if (disk && (disk.accountId !== auth.accountId || disk.fetchedAt !== finishedAt)) {
+        memCache = disk;
+        memCacheLoaded = true;
+        lastDiskReadAt = Date.now();
+        return cacheForAccount(disk, auth.accountId) ? displayFromCache(disk, Date.now()) : null;
+      }
+
+      const estimatedCache = { ...(disk ?? officialCache), costEstimate, estimateSessionRoot: openAISessionRoot };
+      writeCache(estimatedCache);
+      return displayFromCache(estimatedCache, Date.now());
     })
-    .finally(() => { refreshPromise = null; });
+    .finally(() => {
+      releaseLock();
+      refreshPromise = null;
+      refreshAccountId = null;
+    });
   return refreshPromise;
 }

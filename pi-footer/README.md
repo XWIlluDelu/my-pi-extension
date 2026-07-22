@@ -15,8 +15,8 @@ The package ships three independent extensions:
 │                                                                                              │
 │  [editor area]                                                                               │
 │                                                                                              │
-│  ↳ Show me the current status...                       ↑12k ↓3.4k R1.2k W400 $0.123          │  ← below editor
-│  ↳ Show me the current status...                       69%/81% ↺ 1h43m/5d22h                 │  ← same right slot, rotated
+│  ↳ Show me the current status...                       ↑738.1k ↓70.0k R15.5M $13.551         │  ← below editor
+│  ↳ Show me the current status...                       85% ↺ 6d14h Rem. $124                 │  ← same right slot, rotated
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -25,8 +25,9 @@ The package ships three independent extensions:
 - **Powerline above editor**: model + thinking effort, folder basename (joined with the session name while `/name` is set, e.g. `pi • fix-footer`; names are capped at 24 columns with an ellipsis), git branch with staged/unstaged/untracked counts, context-window usage, turn/session timing, extension statuses with pi-fast-mode's ⚡ (`fast` key) first. Segments drop from the right when the terminal is too narrow. The two highest thinking levels get escalating styles: `xhigh` renders as a static rainbow gradient, `max` as the same rainbow in bold, flowing through the text (a 100ms repaint timer that only runs while max is selected).
 - **Turn/session timing** (`⧗ turn / session`): the live turn runs from the first `agent_start` to `agent_settled`, so automatic retries, mid-run compaction, and queued follow-ups extend one turn instead of restarting it, and it never inflates across interrupts. The session total (sum of past turns) is reconstructed from the session log's per-turn timestamps, so it survives `/resume` and reload. A turn interrupted and resumed adds its gap to the historical session total only.
 - **Last prompt + rotating stats**: alternates every 7 seconds between token/cost totals and OpenAI subscription usage, with ANSI-aware truncation that keeps the stats when the prompt can't fit.
-- **Token/cost totals**: input, output, cache-read, cache-write, and Pi's API-equivalent cost with live in-flight usage.
-- **OpenAI subscription usage**: when the selected model provider is `openai-codex`, reads the local OAuth entry, fetches ChatGPT usage asynchronously at most every 15 minutes, caches it on disk, and displays remaining 5h/7d quota plus resets, e.g. `69%/81% ↺ 1h43m/5d22h` or `limited ↺ 1h43m/5d22h`.
+- **Token/cost totals**: input (`↑`), output (`↓`), cache-read (`R`), optional cache-write (`W`), and Pi's API-equivalent cost with live in-flight usage. Zero-valued fields are omitted; OpenAI Codex normally reports cache reads but no separate cache-write count, so `W` is usually absent there.
+- **OpenAI subscription usage**: when the selected model provider is `openai-codex`, reads the local OAuth entry, fetches ChatGPT usage asynchronously at most once per hour, caches it on disk, and displays every quota window returned by OpenAI. The current weekly-only response renders as `85% ↺ 6d14h`; the older 5h + 7d response remains supported in case it returns.
+- **Weekly API-cost estimate**: on each successful usage refresh, incrementally scans all default Pi session directories (or the active custom session directory) from the current quota-window start and sums `openai-codex` API-equivalent cost. Unchanged session files are served from a per-file index instead of reread. If the official meter says 15% used and Pi recorded $21.8, the footer shows `85% ↺ 6d14h Rem. $123.7`, using `used cost × remaining% / used%`. `Rem.` is a compact forecast rather than an official dollar balance: OpenAI meters by task/model complexity, the percentage is rounded, and work outside the active Pi session store (or deleted session logs) is not represented.
 - **Render coalescing**: repaints are skipped while the visible footer state is unchanged; a single 7s heartbeat rotates the usage line and advances the turn timer between agent events.
 - **`/resume` recovery**: last user prompt, cumulative token counts, and session timing are all restored from session history.
 
@@ -77,7 +78,8 @@ on resume (kitty key-release events and the toggle chord itself do not resume).
 State lives under `~/.pi/agent/pi-footer/`:
 
 - `config.json` — editor-clip stash history (last 12 stashed prompts). Written as a single read-modify-write on each change.
-- `openai-usage-cache.json` — OpenAI subscription usage cache, shared across concurrent pi processes so at most one of them fetches per 15-minute window (mode 0600, atomic tmp+rename, active only when the provider is `openai-codex`). Safe to delete; it rebuilds on next refresh.
+- `openai-usage-cache.json` — account-scoped OpenAI subscription usage cache plus the derived weekly cost estimate, shared across concurrent pi processes behind an owner-checked refresh lock (mode 0600, atomic tmp+rename, active only when the provider is `openai-codex`). Safe to delete; it rebuilds on next refresh.
+- `openai-cost-cache.json` — derived per-session-file cost index for the current quota cycle (mode 0600, atomic tmp+rename). It prevents rereading unchanged JSONL logs every hour and is also safe to delete.
 
 ## Architecture
 
@@ -89,6 +91,7 @@ pi-footer/
 ├── segments.ts              — powerline segment renderers, Nerd Font icons, extension-status ordering
 ├── time.ts                  — turn/session timing: active-time clock + log reconstruction + formatters
 ├── openai-usage.ts          — OpenAI usage fetch, parsing, in-memory + disk cache, compact formatting
+├── openai-cost.ts           — current-window API-equivalent cost scan and remaining-cost estimate
 ├── openai-usage-display.ts  — OpenAI usage line: 7s rotation, codex guard, refresh
 ├── bottom-line.ts           — pure function: prompt + right-side stats layout with ANSI-aware truncation
 ├── usage.ts                 — token/cost/context math over session usage
